@@ -11,6 +11,7 @@ let
   osConfig = config; # outer NixOS config — shadowed inside submodules
   cfg = config.manzil;
 
+
   # ────────────────────────────────────────────────────────────────────────
   # File entry submodule.
   # `rootDir`         — directory that `target` is resolved against
@@ -210,6 +211,7 @@ let
     '';
 in
 {
+
   options.manzil = {
     clobberByDefault = mkOption {
       type    = bool;

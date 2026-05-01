@@ -23,33 +23,51 @@ per-platform abstractions. Layer those on top yourself if you want them.
 ```nix
 # flake.nix
 {
-  inputs.manzil.url = "github:you/manzil";
+  inputs.manzil.url  = "github:y0usaf/Manzil";
   inputs.nixpkgs.url = "...";
 
   outputs = { nixpkgs, manzil, ... }: {
     nixosConfigurations.host = nixpkgs.lib.nixosSystem {
       modules = [
         manzil.nixosModules.default
-        ({ pkgs, ... }: {
+        ({ pkgs, lib, ... }: {
           users.users.alice = { isNormalUser = true; home = "/home/alice"; };
 
-          manzil.users.alice.files = {
-            ".bashrc".text = ''
+          manzil.users.alice = {
+            # ── relative to $HOME ──────────────────────────────────────
+            files.".bashrc".text = ''
               alias ll='ls -la'
             '';
 
-            ".config/foo".source = ./dotfiles/foo;
-
-            ".local/bin/script" = {
+            files.".local/bin/script" = {
               source     = ./bin/script.sh;
               executable = true;
             };
 
-            # Overwrite a pre-existing non-symlink file:
-            ".gitconfig" = {
+            files.".gitconfig" = {
               source  = ./gitconfig;
-              clobber = true;
+              clobber = true;            # overwrite real files
             };
+
+            # ── relative to $XDG_CONFIG_HOME (~/.config) ───────────────
+            xdg.config.files."foo/foo.toml".source = ./foo.toml;
+
+            # generator: result is a derivation → goes to `source`
+            xdg.config.files."app/config.json" = {
+              generator = (pkgs.formats.json { }).generate "config.json";
+              value     = { theme = "dark"; size = 14; };
+            };
+
+            # generator: result is a string → goes to `text`
+            xdg.config.files."git/config" = {
+              generator = lib.generators.toGitINI;
+              value     = { user = { email = "me@me.tld"; name = "Me"; }; };
+            };
+
+            # ── other XDG roots ────────────────────────────────────────
+            xdg.cache.files."app/seed".text  = "deadbeef";
+            xdg.data.files."app/db.sqlite".source = ./seed.db;
+            xdg.state.files."app/init".text  = "";
           };
         })
       ];
@@ -60,18 +78,44 @@ per-platform abstractions. Layer those on top yourself if you want them.
 
 ## Options
 
-| Option                                              | Type        | Default                       | Notes                                            |
-| --------------------------------------------------- | ----------- | ----------------------------- | ------------------------------------------------ |
-| `manzil.clobberByDefault`                           | bool        | `false`                       | Default `clobber` for every file.                |
-| `manzil.users.<name>.enable`                        | bool        | `true`                        | Skip the user's files when `false`.              |
-| `manzil.users.<name>.directory`                     | path        | `users.users.<name>.home`     | Root for relative file targets.                  |
-| `manzil.users.<name>.clobberByDefault`              | bool        | `manzil.clobberByDefault`     | Per-user override.                               |
-| `manzil.users.<name>.files."path".text`             | str?        | `null`                        | Inline file contents. Mutually exclusive w/ `source`. |
-| `manzil.users.<name>.files."path".source`           | path?       | `null` (or text-derived)      | Source path to symlink to.                       |
-| `manzil.users.<name>.files."path".target`           | str         | the attribute name            | Path relative to `directory`.                    |
-| `manzil.users.<name>.files."path".executable`       | bool        | `false`                       | Apply +x (only with `text`).                     |
-| `manzil.users.<name>.files."path".clobber`          | bool        | `clobberByDefault`            | Overwrite existing non-symlink target.           |
-| `manzil.users.<name>.files."path".enable`           | bool        | `true`                        | Skip the entry when `false`.                     |
+### Top-level
+
+| Option                                  | Type   | Default | Notes                                |
+| --------------------------------------- | ------ | ------- | ------------------------------------ |
+| `manzil.clobberByDefault`               | bool   | `false` | Default `clobber` for every file.    |
+| `manzil.users.<name>.enable`            | bool   | `true`  | Skip the user's files when `false`.  |
+| `manzil.users.<name>.directory`         | path   | `users.users.<name>.home` | Root for `files`. |
+| `manzil.users.<name>.clobberByDefault`  | bool   | `manzil.clobberByDefault` | Per-user override. |
+
+### File sets (five per user)
+
+Each of these is an `attrsOf` file entries (see below):
+
+| Option                                | Default root            |
+| ------------------------------------- | ----------------------- |
+| `manzil.users.<name>.files`           | `directory` (`$HOME`)   |
+| `manzil.users.<name>.xdg.cache.files` | `$HOME/.cache`          |
+| `manzil.users.<name>.xdg.config.files`| `$HOME/.config`         |
+| `manzil.users.<name>.xdg.data.files`  | `$HOME/.local/share`    |
+| `manzil.users.<name>.xdg.state.files` | `$HOME/.local/state`    |
+
+Each root is overridable via the matching `xdg.<x>.directory` option. Note
+that manzil does **not** export `XDG_*_HOME` environment variables — set
+those yourself in `environment.sessionVariables` or your shell init if you
+override a root.
+
+### File entry options
+
+| Option       | Type                  | Default              | Notes |
+| ------------ | --------------------- | -------------------- | ----- |
+| `enable`     | bool                  | `true`               | Skip when `false`. |
+| `target`     | str (relative)        | the attribute name   | Resolved against the file set's root. Absolute paths rejected. |
+| `text`       | str?                  | `null`               | Inline contents. Becomes a `writeTextFile` source. |
+| `source`     | path?                 | `null`               | Source file or directory to symlink. |
+| `executable` | bool                  | `false`              | +x bit (only meaningful with `text` or string `generator`). |
+| `clobber`    | bool                  | `clobberByDefault`   | Overwrite an existing non-symlink target. |
+| `generator`  | function?             | `null`               | Applied to `value`; result routes to `source` (path/derivation) or `text` (string). |
+| `value`      | any?                  | `null`               | Argument passed to `generator`. |
 
 ## How it works
 
