@@ -1,19 +1,18 @@
 {
-  description = "manzil — minimalist replacement for Home Manager's home.files";
+  description = "manzil — minimalist home files";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  outputs = { self, nixpkgs, ... }:
-    let
-      forSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
-      pkgsFor    = system: nixpkgs.legacyPackages.${system};
-    in {
-      nixosModules.default = ./module.nix;
-      nixosModules.manzil  = ./module.nix;
+  outputs = {nixpkgs, ...}: {
+    nixosModules.default = ./nix/modules/nixos.nix;
+    nixosModules.manzil = ./nix/modules/nixos.nix;
 
-      packages = forSystems (system: rec {
-        manzil  = (pkgsFor system).callPackage ./package.nix { };
-        default = manzil;
-      });
-    };
+    darwinModules.default = ./nix/modules/darwin.nix;
+    darwinModules.manzil = ./nix/modules/darwin.nix;
+
+    packages = (nixpkgs.lib.genAttrs ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"]) (system: rec {
+      manzil = nixpkgs.legacyPackages."${system}".callPackage ./nix/package.nix {};
+      default = manzil;
+    });
+  };
 }

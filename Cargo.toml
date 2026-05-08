@@ -2,7 +2,7 @@
 name        = "manzil"
 version     = "0.1.0"
 edition     = "2021"
-description = "Minimalist file linker for the manzil NixOS module"
+description = "Minimalist home file reconciler"
 license     = "MIT"
 
 [[bin]]

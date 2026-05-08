@@ -2,72 +2,63 @@
 
 > منزل — *home* (ar.)
 
-A deliberately tiny replacement for Home Manager's `home.files`. A NixOS
-module plus a small Rust linker (`manzil`) — that's the entire project.
+Tiny home management for NixOS + nix-darwin: a small module, a small Rust
+linker, JSON manifests.
 
-## Scope
+## Features
 
-manzil only does what `home.files` does, no more:
-
-- Declare files in a user's `$HOME` from Nix.
-- Link them with symlinks to `/nix/store`.
-- Track them across rebuilds via a JSON manifest, so removed entries are
-  cleaned up (no dangling symlinks).
-
-It does **not** ship XDG helpers, generators, format writers, systemd unit
-generation, mime-apps, environment variables, package management, or
-per-platform abstractions. Layer those on top yourself if you want them.
+- Per-user home files under `$HOME` + XDG roots.
+- File entry types: `symlink`, `copy`, `delete`, `directory`, `modify`.
+- Metadata for real paths: `permissions`, `uid`, `gid`.
+- Per-user environment scripts + automatic `XDG_*_HOME` when XDG roots change.
+- `mimeapps.list` generation.
+- Per-user packages.
+- NixOS user systemd unit generation.
+- nix-darwin module export.
+- Configurable linker package + args.
+- User submodule extension via `extraModules` + `specialArgs`.
 
 ## Usage
 
 ```nix
 # flake.nix
 {
-  inputs.manzil.url  = "github:y0usaf/Manzil";
-  inputs.nixpkgs.url = "...";
+  inputs.manzil.url = "github:you/manzil";
 
-  outputs = { nixpkgs, manzil, ... }: {
+  outputs = { self, nixpkgs, manzil, ... }: {
     nixosConfigurations.host = nixpkgs.lib.nixosSystem {
       modules = [
         manzil.nixosModules.default
-        ({ pkgs, lib, ... }: {
+        ({ pkgs, config, ... }: {
           users.users.alice = { isNormalUser = true; home = "/home/alice"; };
 
           manzil.users.alice = {
-            # ── relative to $HOME ──────────────────────────────────────
+            packages = [ pkgs.hello ];
+            environment.sessionVariables.EDITOR = "nvim";
+
+            files.".manzil-env".source = config.manzil.users.alice.environment.loadEnv;
             files.".bashrc".text = ''
-              alias ll='ls -la'
+              export MANZIL=1
+              . ~/.manzil-env
             '';
 
-            files.".local/bin/script" = {
-              source     = ./bin/script.sh;
-              executable = true;
+            files.".config/app/config.toml" = {
+              type = "copy";
+              text = "theme = 'dark'\n";
+              permissions = "0600";
             };
 
-            files.".gitconfig" = {
-              source  = ./gitconfig;
-              clobber = true;            # overwrite real files
+            files.".cache/app" = {
+              type = "directory";
+              permissions = "0700";
             };
 
-            # ── relative to $XDG_CONFIG_HOME (~/.config) ───────────────
-            xdg.config.files."foo/foo.toml".source = ./foo.toml;
+            files."old-file".type = "delete";
+            files.".ssh/config" = { type = "modify"; permissions = "0600"; };
 
-            # generator: result is a derivation → goes to `source`
-            xdg.config.files."app/config.json" = {
-              generator = (pkgs.formats.json { }).generate "config.json";
-              value     = { theme = "dark"; size = 14; };
-            };
+            xdg.mimeApps.defaultApplications."text/plain" = "nvim.desktop";
 
-            # generator: result is a string → goes to `text`
-            xdg.config.files."git/config" = {
-              generator = lib.generators.toGitINI;
-              value     = { user = { email = "me@me.tld"; name = "Me"; }; };
-            };
-
-            # ── other XDG roots ────────────────────────────────────────
-            xdg.cache.files."app/seed".text  = "deadbeef";
-            xdg.data.files."app/db.sqlite".source = ./seed.db;
-            xdg.state.files."app/init".text  = "";
+            systemd.services.demo.serviceConfig.ExecStart = "${pkgs.hello}/bin/hello";
           };
         })
       ];
@@ -76,119 +67,110 @@ per-platform abstractions. Layer those on top yourself if you want them.
 }
 ```
 
+For nix-darwin, import `manzil.darwinModules.default`.
+
 ## Options
 
 ### Top-level
 
-| Option                                  | Type   | Default | Notes                                |
-| --------------------------------------- | ------ | ------- | ------------------------------------ |
-| `manzil.clobberByDefault`               | bool   | `false` | Default `clobber` for every file.    |
-| `manzil.users.<name>.enable`            | bool   | `true`  | Skip the user's files when `false`.  |
-| `manzil.users.<name>.directory`         | path   | `users.users.<name>.home` | Root for `files`. |
-| `manzil.users.<name>.clobberByDefault`  | bool   | `manzil.clobberByDefault` | Per-user override. |
+| Option | Type | Default |
+| --- | --- | --- |
+| `manzil.clobberByDefault` | bool | `false` |
+| `manzil.linker` | package | bundled `manzil` |
+| `manzil.linkerArgs` | list of string | `[ ]` |
+| `manzil.extraModules` | list of modules | `[ ]` |
+| `manzil.specialArgs` | attrs | `{ }` |
+| `manzil.users.<name>.enable` | bool | `true` |
+| `manzil.users.<name>.directory` | path | OS user home |
+| `manzil.users.<name>.packages` | list of packages | `[ ]` |
+| `manzil.users.<name>.environment.sessionVariables` | attrs | `{ }` |
+| `manzil.users.<name>.environment.loadEnv` | path | generated shell script |
 
-### File sets (five per user)
+### File sets
 
-Each of these is an `attrsOf` file entries (see below):
+All are `attrsOf` file entries:
 
-| Option                                | Default root            |
-| ------------------------------------- | ----------------------- |
-| `manzil.users.<name>.files`           | `directory` (`$HOME`)   |
-| `manzil.users.<name>.xdg.cache.files` | `$HOME/.cache`          |
-| `manzil.users.<name>.xdg.config.files`| `$HOME/.config`         |
-| `manzil.users.<name>.xdg.data.files`  | `$HOME/.local/share`    |
-| `manzil.users.<name>.xdg.state.files` | `$HOME/.local/state`    |
+| Option | Root |
+| --- | --- |
+| `manzil.users.<name>.files` | `$HOME` |
+| `manzil.users.<name>.xdg.cache.files` | `$HOME/.cache` |
+| `manzil.users.<name>.xdg.config.files` | `$HOME/.config` |
+| `manzil.users.<name>.xdg.data.files` | `$HOME/.local/share` |
+| `manzil.users.<name>.xdg.state.files` | `$HOME/.local/state` |
 
-Each root is overridable via the matching `xdg.<x>.directory` option. Note
-that manzil does **not** export `XDG_*_HOME` environment variables — set
-those yourself in `environment.sessionVariables` or your shell init if you
-override a root.
+Each XDG root has a matching `.directory` option. If changed, the generated env
+script exports the corresponding `XDG_*_HOME` variable.
 
-### File entry options
+### File entries
 
-| Option       | Type                  | Default              | Notes |
-| ------------ | --------------------- | -------------------- | ----- |
-| `enable`     | bool                  | `true`               | Skip when `false`. |
-| `target`     | str (relative)        | the attribute name   | Resolved against the file set's root. Absolute paths rejected. |
-| `text`       | str?                  | `null`               | Inline contents. Becomes a `writeTextFile` source. |
-| `source`     | path?                 | `null`               | Source file or directory to symlink. |
-| `executable` | bool                  | `false`              | +x bit (only meaningful with `text` or string `generator`). |
-| `clobber`    | bool                  | `clobberByDefault`   | Overwrite an existing non-symlink target. |
-| `generator`  | function?             | `null`               | Applied to `value`; result routes to `source` (path/derivation) or `text` (string). |
-| `value`      | any?                  | `null`               | Argument passed to `generator`. |
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enable` | bool | `true` | Skip when false. |
+| `type` | enum | `"symlink"` | `symlink`, `copy`, `delete`, `directory`, `modify`. |
+| `target` | clean relative string | attr name | Absolute paths, `.`, `..`, empty segments rejected. |
+| `text` | string? | `null` | Generated source for `symlink`/`copy`. |
+| `source` | path? | `null` | Required for `symlink`/`copy`. |
+| `executable` | bool | `false` | +x for generated `text` source. |
+| `clobber` | bool | default | Replace unmanaged targets where safe. |
+| `permissions` | octal string? | `null` | For `copy`/`directory`/`modify`. |
+| `uid` / `gid` | int? | `null` | For `copy`/`directory`/`modify`. |
+| `generator` | function? | `null` | Applied to `value`; returns source path or text. |
+| `value` | any? | `null` | Generator input. |
 
-## How it works
+## Linker rules
 
-1. The module renders one JSON manifest per user (`/nix/store/...-manzil-manifest-<user>.json`).
-2. A NixOS activation script, ordered after `users`/`groups`:
-   - Runs the `manzil` binary as the target user via `runuser`.
-   - The binary compares the new manifest with the previous one in `/var/lib/manzil/`
-     and reconciles symlinks: prunes removed entries, links new ones, refreshes
-     changed ones.
-   - On linker success, the activation script copies the new manifest into
-     `/var/lib/manzil/manifest-<user>.json` for the next rebuild. On failure
-     state is left untouched so the next run can retry.
-
-### Robustness properties
-
-- **Atomic per-file replacement.** New symlinks are created at a sibling
-  `.manzil-tmp.<pid>` path and `rename(2)`d into place. No ENOENT window for
-  readers.
-- **Mutual exclusion.** `flock(2)` on `$HOME/.local/state/manzil/lock` is held
-  for the duration of a run; concurrent invocations serialise instead of
-  racing.
-- **Idempotent.** A re-run with an unchanged manifest performs zero writes and
-  emits zero output.
-- **Continue-on-error.** Per-entry failures are reported on stderr; the run
-  exits non-zero only if any entry failed, but every other entry is still
-  attempted.
-- **No runtime dependencies** beyond `glibc`. The binary is ~370 KiB.
-
-### Manifest schema
+Manifest schema v2:
 
 ```json
 {
+  "version": 2,
   "files": [
-    { "target": "/home/alice/.bashrc",     "source": "/nix/store/...", "clobber": false },
-    { "target": "/home/alice/.gitconfig",  "source": "/nix/store/...", "clobber": true  }
+    { "type": "symlink", "target": "/home/alice/.bashrc", "source": "/nix/store/...", "clobber": false },
+    { "type": "copy", "target": "/home/alice/.config/app", "source": "/nix/store/...", "permissions": "0600" },
+    { "type": "directory", "target": "/home/alice/.cache/app", "permissions": "0700" },
+    { "type": "delete", "target": "/home/alice/old" },
+    { "type": "modify", "target": "/home/alice/.ssh/config", "permissions": "0600" }
   ]
 }
 ```
 
-### Linker rules
+- `symlink`: current behavior; owned symlinks update/prune atomically.
+- `copy`: copies a source file. Existing files update only when unchanged from the old source or `clobber = true`.
+- `directory`: creates a real directory; prunes only if empty.
+- `delete`: removes a file/symlink/directory tree if present.
+- `modify`: applies metadata to an existing path; missing paths are ignored.
+- Symlinks never receive `permissions`/`uid`/`gid`.
 
-- Target in old manifest, not in new → removed iff it's still a symlink.
-  User-replaced regular files are left alone (with a warning).
-- Target in new manifest:
-  - Existing symlink to the correct source → no-op (silent).
-  - Existing symlink to a different source → atomic swap.
-  - Existing non-symlink + `clobber=true`  → removed and replaced.
-  - Existing non-symlink + `clobber=false` → warned, skipped.
-  - Missing → created.
-
-You can invoke the linker directly:
+Invoke directly:
 
 ```sh
-manzil /path/to/new.json /var/lib/manzil/manifest-alice.json
+manzil /path/to/new.json /path/to/old.json
 ```
 
-## Non-goals
+## Systemd user units, MIME, env
 
-- Multi-platform (Darwin, etc.). NixOS only.
-- Reload/restart of user services on file change — out of scope; wire it up
-  yourself with `systemd.user.services.<x>.restartTriggers` if you need it.
-- Per-file uid/gid/perms beyond `executable` — symlinks don't carry mode, and
-  the user owns their own home.
+```nix
+manzil.users.alice = {
+  environment.sessionVariables.PATH = [ "$HOME/.local/bin" "/run/current-system/sw/bin" ];
 
-## Building the linker
+  xdg.mimeApps = {
+    defaultApplications."text/plain" = [ "nvim.desktop" ];
+    addedAssociations."image/png" = [ "imv.desktop" "gimp.desktop" ];
+  };
+
+  systemd.services.agent = {
+    description = "demo agent";
+    serviceConfig.ExecStart = "${pkgs.hello}/bin/hello";
+  };
+};
+```
+
+`environment.loadEnv` is a POSIX shell script; source it from your shell/profile
+where desired.
+
+## Building
 
 ```sh
-nix build .#manzil           # via flake
-cargo build --release        # directly
+nix build
+cargo build --release
 ```
-
-The binary depends only on `serde`, `serde_json`, and `libc`.
-
-## License
-
-MIT. The whole thing is ~350 lines: ~155 nix + ~190 rust.
