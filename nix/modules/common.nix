@@ -134,10 +134,11 @@
       ];
     })) name u;
     old = "${stateDir}/manifest-${name}.json";
+    home = osUsers."${name}".home or (if isDarwin then "/Users/${name}" else "/home/${name}");
     cmd = "${concatStringsSep " " (map escapeShellArg ([(getExe cfg.linker)] ++ cfg.linkerArgs))} ${escapeShellArg "${new}"} ${escapeShellArg old}";
     body = ''
       if ${if isNixOS
-      then "${pkgs.util-linux}/bin/runuser -u ${escapeShellArg name} -- ${cmd}"
+      then "${pkgs.util-linux}/bin/runuser -u ${escapeShellArg name} -- env HOME=${escapeShellArg home} ${cmd}"
       else "/usr/bin/su -l ${escapeShellArg name} -c ${escapeShellArg cmd}"}; then
         ${pkgs.coreutils}/bin/install -m 0644 ${escapeShellArg "${new}"} ${escapeShellArg old}
       else

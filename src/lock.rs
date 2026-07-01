@@ -1,13 +1,14 @@
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, ErrorKind};
+use std::io;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 
 pub(crate) fn acquire() -> io::Result<File> {
-    let home =
-        env::var_os("HOME").ok_or_else(|| io::Error::new(ErrorKind::NotFound, "HOME not set"))?;
-    let dir = PathBuf::from(home).join(".local/state/manzil");
+    let dir = match env::var_os("HOME") {
+        Some(home) => PathBuf::from(home).join(".local/state/manzil"),
+        None => PathBuf::from("/tmp/manzil"),
+    };
     fs::create_dir_all(&dir)?;
 
     let path = dir.join("lock");
