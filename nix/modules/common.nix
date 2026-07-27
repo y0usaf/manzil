@@ -69,6 +69,7 @@
 
   isNixOS = platform == "nixos";
   isDarwin = platform == "darwin";
+  isFinix = platform == "finix";
   stateDir =
     if isDarwin
     then "/var/db/manzil"
@@ -139,6 +140,10 @@
     body = ''
       if ${if isNixOS
       then "${pkgs.util-linux}/bin/runuser -u ${escapeShellArg name} -- env HOME=${escapeShellArg home} ${cmd}"
+      # finix PAM has no runuser service; setpriv does the same uid/gid drop
+      # with zero PAM. uid/gid resolved at run time (after the users script).
+      else if isFinix
+      then "${pkgs.util-linux}/bin/setpriv --reuid \"$(${pkgs.coreutils}/bin/id -u ${escapeShellArg name})\" --regid \"$(${pkgs.coreutils}/bin/id -g ${escapeShellArg name})\" --clear-groups ${pkgs.coreutils}/bin/env HOME=${escapeShellArg home} ${cmd}"
       else "/usr/bin/su -l ${escapeShellArg name} -c ${escapeShellArg cmd}"}; then
         ${pkgs.coreutils}/bin/install -m 0644 ${escapeShellArg "${new}"} ${escapeShellArg old}
       else
@@ -146,15 +151,8 @@
       fi
     '';
   in
-    if isNixOS
+    if isDarwin
     then ''
-      _lock=${escapeShellArg "${stateDir}/lock-${name}"}
-      (
-        ${pkgs.util-linux}/bin/flock -x 9
-        ${body}
-      ) 9>"$_lock"
-    ''
-    else ''
       if /usr/bin/id -u ${escapeShellArg name} >/dev/null 2>&1; then
         _lock=${escapeShellArg "${stateDir}/lock-${name}"}
         (
@@ -165,6 +163,13 @@
       else
         echo ${escapeShellArg "manzil: user ${name} does not exist; skipped"} >&2
       fi
+    ''
+    else ''
+      _lock=${escapeShellArg "${stateDir}/lock-${name}"}
+      (
+        ${pkgs.util-linux}/bin/flock -x 9
+        ${body}
+      ) 9>"$_lock"
     '') n enabledUsers."${n}") (attrNames enabledUsers)}
   '';
 in {
@@ -532,12 +537,24 @@ in {
       default = {};
       description = "Per-user configurations, keyed by username.";
     };
+  }
+  // optionalAttrs isFinix {
+    finit.conditions = mkOption {
+      type = listOf str;
+      default = [];
+      example = ["task/persist-user-binds/success"];
+      description = ''
+        When non-empty, run the linker as a `finit` task gated on these
+        conditions instead of a `system.activation` script. Use for homes
+        that only exist after activation (late mounts, impermanence binds).
+      '';
+    };
   };
 
   config = mkIf (enabledUsers != {}) (mkMerge [
     {
       assertions = flatten (mapAttrsToList (uname: u:
-        optional isNixOS (let
+        optional (isNixOS || isFinix) (let
           osUser = osUsers."${uname}" or {};
         in {
           assertion =
@@ -584,12 +601,28 @@ in {
       environment.systemPackages = [cfg.linker];
     }
 
-    (mkIf isNixOS {
+    (optionalAttrs isNixOS {
       system.activationScripts.manzil = stringAfter ["users" "groups"] activationScript;
     })
 
-    (mkIf isDarwin {
+    (optionalAttrs isDarwin {
       system.activationScripts.manzil.text = activationScript;
+    })
+
+    (optionalAttrs isFinix {
+      # Runs every boot (finix-setup) and on every switch, after the users
+      # script; the manifest rides the topLevel closure, so every source it
+      # references stays GC-rooted.
+      system.activation.scripts.manzil = mkIf (cfg.finit.conditions == []) {
+        deps = ["users"];
+        text = activationScript;
+      };
+      finit.tasks.manzil = mkIf (cfg.finit.conditions != []) {
+        description = "manzil: materialize user files";
+        conditions = cfg.finit.conditions;
+        command = pkgs.writeShellScript "manzil-link" activationScript;
+        log = true;
+      };
     })
   ]);
 }

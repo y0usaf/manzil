@@ -2,8 +2,8 @@
 
 > منزل — *home* (ar.)
 
-Tiny home management for NixOS + nix-darwin: a small module, a small Rust
-linker, JSON manifests.
+Tiny home management for NixOS, nix-darwin + [finix](https://github.com/finix-community/finix):
+a small module, a small Rust linker, JSON manifests.
 
 ## Features
 
@@ -15,6 +15,7 @@ linker, JSON manifests.
 - Per-user packages.
 - NixOS user systemd unit generation.
 - nix-darwin module export.
+- finix module export (activation script or gated finit task).
 - Configurable linker package + args.
 - User submodule extension via `extraModules` + `specialArgs`.
 
@@ -69,6 +70,24 @@ linker, JSON manifests.
 
 For nix-darwin, import `manzil.darwinModules.default`.
 
+### finix
+
+For [finix](https://github.com/finix-community/finix), add
+`manzil.finixModules.default` to your `finixSystem` modules. By default the
+linker runs from `system.activation.scripts.manzil` (after `users`), so files
+materialize on every boot and switch, and the manifest — plus every source it
+references — rides the `topLevel` closure (GC-safe). The uid switch uses
+`setpriv` instead of `runuser`, since finix PAM has no `runuser` service.
+
+If home directories only appear after activation (late mounts, impermanence
+binds), run the linker as a finit task gated on conditions instead:
+
+```nix
+manzil.finit.conditions = [ "task/persist-user-binds/success" ];
+```
+
+`systemd.*` user unit options are NixOS-only and not available on finix.
+
 ## Options
 
 ### Top-level
@@ -80,6 +99,7 @@ For nix-darwin, import `manzil.darwinModules.default`.
 | `manzil.linkerArgs` | list of string | `[ ]` |
 | `manzil.extraModules` | list of modules | `[ ]` |
 | `manzil.specialArgs` | attrs | `{ }` |
+| `manzil.finit.conditions` (finix only) | list of string | `[ ]` |
 | `manzil.users.<name>.enable` | bool | `true` |
 | `manzil.users.<name>.directory` | path | OS user home |
 | `manzil.users.<name>.packages` | list of packages | `[ ]` |
