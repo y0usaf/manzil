@@ -1,9 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
+
+use crate::formats::Format;
+use crate::merge::ArrayStrategy;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -13,20 +16,16 @@ pub(crate) struct Manifest {
     pub(crate) files: Vec<Entry>,
 }
 
-#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum EntryType {
+    #[default]
     Symlink,
     Copy,
     Delete,
     Directory,
     Modify,
-}
-
-impl Default for EntryType {
-    fn default() -> Self {
-        Self::Symlink
-    }
+    Merge,
 }
 
 #[derive(Clone, Deserialize)]
@@ -45,6 +44,15 @@ pub(crate) struct Entry {
     pub(crate) uid: Option<u32>,
     #[serde(default)]
     pub(crate) gid: Option<u32>,
+    /// Format of the existing file a `merge` entry patches into.
+    #[serde(default)]
+    pub(crate) format: Option<Format>,
+    /// Default array strategy for `merge` entries.
+    #[serde(default, rename = "arrayDefault")]
+    pub(crate) array_default: ArrayStrategy,
+    /// Per-path (dot-separated) array strategy overrides for `merge` entries.
+    #[serde(default)]
+    pub(crate) arrays: HashMap<String, ArrayStrategy>,
 }
 
 pub(crate) fn read(path: &Path) -> io::Result<Manifest> {
@@ -54,7 +62,7 @@ pub(crate) fn read(path: &Path) -> io::Result<Manifest> {
 
 pub(crate) fn validate(manifest: &Manifest, allow_legacy_version: bool) -> io::Result<()> {
     match manifest.version {
-        Some(1 | 2) => {}
+        Some(1..=3) => {}
         Some(version) => {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
@@ -78,10 +86,10 @@ pub(crate) fn validate(manifest: &Manifest, allow_legacy_version: bool) -> io::R
         }
 
         match entry.ty {
-            EntryType::Symlink | EntryType::Copy if entry.source.is_none() => {
+            EntryType::Symlink | EntryType::Copy | EntryType::Merge if entry.source.is_none() => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidData,
-                    "source is required for symlink/copy entries",
+                    "source is required for symlink/copy/merge entries",
                 ));
             }
             EntryType::Delete | EntryType::Directory | EntryType::Modify
@@ -89,21 +97,34 @@ pub(crate) fn validate(manifest: &Manifest, allow_legacy_version: bool) -> io::R
             {
                 return Err(io::Error::new(
                     ErrorKind::InvalidData,
-                    "source is only valid for symlink/copy entries",
+                    "source is only valid for symlink/copy/merge entries",
                 ));
             }
             _ => {}
         }
 
+        if entry.ty == EntryType::Merge && entry.format.is_none() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "format is required for merge entries",
+            ));
+        }
+        if entry.ty != EntryType::Merge && (entry.format.is_some() || !entry.arrays.is_empty()) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "format/arrays are only valid for merge entries",
+            ));
+        }
+
         if has_metadata(entry)
             && !matches!(
                 entry.ty,
-                EntryType::Copy | EntryType::Directory | EntryType::Modify
+                EntryType::Copy | EntryType::Directory | EntryType::Modify | EntryType::Merge
             )
         {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
-                "metadata is only valid for copy/directory/modify entries",
+                "metadata is only valid for copy/directory/modify/merge entries",
             ));
         }
 

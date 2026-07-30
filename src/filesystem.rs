@@ -7,13 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::formats::{self, Format};
 use crate::manifest::{parse_mode, Entry, EntryType};
+use crate::merge::{merge, unmerge, MergeConfig};
 
 pub(crate) fn prune(entry: &Entry) -> io::Result<()> {
     match entry.ty {
         EntryType::Symlink => prune_symlink(entry),
         EntryType::Copy => prune_copy(entry),
         EntryType::Directory => prune_directory(entry),
+        EntryType::Merge => prune_merge(entry),
         EntryType::Delete | EntryType::Modify => Ok(()),
     }
 }
@@ -25,6 +28,7 @@ pub(crate) fn activate(entry: &Entry, old: Option<&Entry>) -> io::Result<()> {
         EntryType::Delete => remove_path_if_present(&entry.target),
         EntryType::Directory => activate_directory(entry),
         EntryType::Modify => activate_modify(entry),
+        EntryType::Merge => activate_merge(entry, old),
     }
 }
 
@@ -220,6 +224,180 @@ fn activate_modify(entry: &Entry) -> io::Result<()> {
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// Merge entries never own their target: the file is created if missing,
+/// patched in place otherwise, and never deleted. Convergence on patch
+/// change: the old patch is un-merged before the new one is merged.
+fn activate_merge(entry: &Entry, old: Option<&Entry>) -> io::Result<()> {
+    let patch_path = source(entry)?;
+    let format = merge_format(entry)?;
+    ensure_parent(&entry.target)?;
+
+    let existing_raw = read_text_if_present(&entry.target)?.unwrap_or_default();
+    let mut existing_val = parse_existing(&existing_raw, format, &entry.target)?;
+
+    // Patch changed between manifests: un-merge the old one first so keys
+    // dropped from the patch do not linger. Unreadable old patch (GC'd
+    // store path) degrades to a plain merge — same exposure prune_copy has.
+    if let Some(old_entry) = old {
+        if old_entry.ty == EntryType::Merge && old_entry.source != entry.source {
+            match old_entry.source.as_deref().map(fs::read_to_string) {
+                Some(Ok(raw)) => match serde_json::from_str(&raw) {
+                    Ok(old_patch) => existing_val = unmerge(existing_val, &old_patch),
+                    Err(e) => eprintln!(
+                        "manzil: warning: {}: old patch unparsable, skipping un-merge: {e}",
+                        entry.target.display()
+                    ),
+                },
+                Some(Err(e)) => eprintln!(
+                    "manzil: warning: {}: old patch unreadable, skipping un-merge: {e}",
+                    entry.target.display()
+                ),
+                None => {}
+            }
+        }
+    }
+
+    let patch_raw = fs::read_to_string(patch_path)?;
+    let patch_val: serde_json::Value = serde_json::from_str(&patch_raw)
+        .map_err(|e| io::Error::new(ErrorKind::InvalidData, format!("patch is not JSON: {e}")))?;
+    if patch_val.is_null() {
+        return Err(io::Error::new(ErrorKind::InvalidData, "patch is null"));
+    }
+
+    let config = MergeConfig {
+        default_array: entry.array_default,
+        path_strategies: entry.arrays.clone(),
+        clobber: entry.clobber,
+    };
+    let merged = merge(existing_val, patch_val, &config, "");
+    let out = formats::serialize(&merged, format).map_err(anyhow_to_io)?;
+
+    if out != existing_raw {
+        atomic_write_text(&entry.target, &out)?;
+    }
+    apply_metadata(&entry.target, entry)
+}
+
+/// Un-merge on entry removal: delete keys whose disk value still equals the
+/// old patch value, keep everything else, never delete the file itself.
+/// All failure paths warn and leave the file alone — prune must not brick
+/// activation over a file the user may have rewritten.
+fn prune_merge(entry: &Entry) -> io::Result<()> {
+    let patch_path = source(entry)?;
+    let format = merge_format(entry)?;
+
+    let Some(existing_raw) = read_text_if_present(&entry.target)? else {
+        return Ok(());
+    };
+    let old_patch: serde_json::Value = match fs::read_to_string(patch_path)
+        .map_err(|e| e.to_string())
+        .and_then(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string()))
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "manzil: warning: stale merge {}: old patch unusable, leaving alone: {e}",
+                entry.target.display()
+            );
+            return Ok(());
+        }
+    };
+    let existing_val = match formats::parse(&existing_raw, format) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "manzil: warning: stale merge {}: unparsable, leaving alone: {e:#}",
+                entry.target.display()
+            );
+            return Ok(());
+        }
+    };
+
+    let cleaned = unmerge(existing_val.clone(), &old_patch);
+    if cleaned != existing_val {
+        let out = formats::serialize(&cleaned, format).map_err(anyhow_to_io)?;
+        atomic_write_text(&entry.target, &out)?;
+        eprintln!("manzil: un-merged {}", entry.target.display());
+    }
+    Ok(())
+}
+
+fn merge_format(entry: &Entry) -> io::Result<Format> {
+    entry
+        .format
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "missing format"))
+}
+
+fn parse_existing(raw: &str, format: Format, target: &Path) -> io::Result<serde_json::Value> {
+    if raw.trim().is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    formats::parse(raw, format).map_err(|e| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "{}: existing file unparsable as {format:?}: {e:#}",
+                target.display()
+            ),
+        )
+    })
+}
+
+fn read_text_if_present(path: &Path) -> io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn anyhow_to_io(e: anyhow::Error) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, format!("{e:#}"))
+}
+
+/// Atomic in-place text write: sibling tmp + rename, preserving the mode of
+/// an existing target (rename would otherwise reset it to the umask default).
+fn atomic_write_text(target: &Path, contents: &str) -> io::Result<()> {
+    let prior_mode = fs::metadata(target).ok().map(|m| m.permissions());
+    let mut last_exists = None;
+
+    for _ in 0..128 {
+        let tmp = sibling_tmp(target);
+        let result = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(contents.as_bytes())
+            });
+        match result {
+            Ok(()) => {
+                if let Some(perms) = prior_mode {
+                    fs::set_permissions(&tmp, perms)?;
+                }
+                if let Err(e) = fs::rename(&tmp, target) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e);
+                }
+                return Ok(());
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => last_exists = Some(e),
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+    }
+
+    Err(last_exists.unwrap_or_else(|| {
+        io::Error::new(
+            ErrorKind::AlreadyExists,
+            "could not allocate temporary file",
+        )
+    }))
 }
 
 fn ensure_parent(path: &Path) -> io::Result<()> {

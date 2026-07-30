@@ -560,3 +560,181 @@ fn manifest_is_read_after_lock_is_acquired() {
     assert_success(&output);
     assert_eq!(fs::read_link(&target).unwrap(), source_b);
 }
+
+// --- merge entries (schema v3) ---
+
+fn merge_entry(target: &Path, patch: &Path, format: &str, clobber: bool) -> String {
+    format!(
+        r#"{{"type":"merge","target":"{}","source":"{}","format":"{}","clobber":{}}}"#,
+        json_escape(target),
+        json_escape(patch),
+        format,
+        clobber
+    )
+}
+
+fn write_v3_manifest(path: &Path, entries: &[String]) {
+    fs::write(
+        path,
+        format!(r#"{{"version":3,"files":[{}]}}"#, entries.join(",")),
+    )
+    .unwrap();
+}
+
+#[test]
+fn merge_creates_missing_file() {
+    let tmp = TempDir::new();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let patch = tmp.path().join("patch.json");
+    write_source(&patch, r#"{"editor":{"fontSize":14},"theme":"dark"}"#);
+    let target = home.join(".config/app/settings.json");
+
+    let new_json = tmp.path().join("new.json");
+    write_v3_manifest(&new_json, &[merge_entry(&target, &patch, "json", false)]);
+
+    let output = run(&home, &new_json, None);
+    assert_success(&output);
+    let disk: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(disk["editor"]["fontSize"], 14);
+    assert_eq!(disk["theme"], "dark");
+}
+
+#[test]
+fn merge_no_clobber_preserves_user_edit() {
+    let tmp = TempDir::new();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let patch = tmp.path().join("patch.json");
+    write_source(&patch, r#"{"theme":"dark","fontSize":14}"#);
+    let target = home.join("settings.json");
+    write_source(&target, r#"{"theme":"light"}"#);
+
+    let new_json = tmp.path().join("new.json");
+    write_v3_manifest(&new_json, &[merge_entry(&target, &patch, "json", false)]);
+
+    let output = run(&home, &new_json, None);
+    assert_success(&output);
+    let disk: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    // user's runtime value survives; missing key filled in
+    assert_eq!(disk["theme"], "light");
+    assert_eq!(disk["fontSize"], 14);
+}
+
+#[test]
+fn merge_clobber_overwrites_existing_value() {
+    let tmp = TempDir::new();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let patch = tmp.path().join("patch.json");
+    write_source(&patch, r#"{"theme":"dark"}"#);
+    let target = home.join("settings.json");
+    write_source(&target, r#"{"theme":"light","user":"alice"}"#);
+
+    let new_json = tmp.path().join("new.json");
+    write_v3_manifest(&new_json, &[merge_entry(&target, &patch, "json", true)]);
+
+    let output = run(&home, &new_json, None);
+    assert_success(&output);
+    let disk: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(disk["theme"], "dark");
+    assert_eq!(disk["user"], "alice");
+}
+
+#[test]
+fn merge_prune_unmerges_owned_keys_only() {
+    let tmp = TempDir::new();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let patch = tmp.path().join("patch.json");
+    write_source(&patch, r#"{"theme":"dark","fontSize":14}"#);
+    let target = home.join("settings.json");
+    let old_json = tmp.path().join("old.json");
+    let new_json = tmp.path().join("new.json");
+
+    // first run: merge into a file that has a pre-existing user key
+    write_source(&target, r#"{"user":"alice"}"#);
+    write_v3_manifest(&old_json, &[merge_entry(&target, &patch, "json", false)]);
+    let output = run(&home, &old_json, None);
+    assert_success(&output);
+
+    // user edits one merged key at runtime
+    let mut disk: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    disk["fontSize"] = serde_json::json!(18);
+    fs::write(&target, serde_json::to_string(&disk).unwrap()).unwrap();
+
+    // entry removed: theme (still ours) vanishes, fontSize (edited) and user stay
+    write_v3_manifest(&new_json, &[]);
+    let output = run(&home, &new_json, Some(&old_json));
+    assert_success(&output);
+    let disk: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert!(disk.get("theme").is_none(), "owned key must be un-merged");
+    assert_eq!(disk["fontSize"], 18);
+    assert_eq!(disk["user"], "alice");
+}
+
+#[test]
+fn merge_patch_change_converges() {
+    let tmp = TempDir::new();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let patch_a = tmp.path().join("patch-a.json");
+    let patch_b = tmp.path().join("patch-b.json");
+    write_source(&patch_a, r#"{"alpha":1}"#);
+    write_source(&patch_b, r#"{"beta":2}"#);
+    let target = home.join("settings.json");
+    let old_json = tmp.path().join("old.json");
+    let new_json = tmp.path().join("new.json");
+
+    write_v3_manifest(&old_json, &[merge_entry(&target, &patch_a, "json", false)]);
+    let output = run(&home, &old_json, None);
+    assert_success(&output);
+
+    write_v3_manifest(&new_json, &[merge_entry(&target, &patch_b, "json", false)]);
+    let output = run(&home, &new_json, Some(&old_json));
+    assert_success(&output);
+    let disk: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert!(
+        disk.get("alpha").is_none(),
+        "key dropped from patch must not linger"
+    );
+    assert_eq!(disk["beta"], 2);
+}
+
+#[test]
+fn merge_toml_roundtrip() {
+    let tmp = TempDir::new();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let patch = tmp.path().join("patch.json");
+    write_source(&patch, r#"{"profile":{"model":"opus"}}"#);
+    let target = home.join(".config/tool/config.toml");
+    write_source(&target, "[profile]\nname = \"main\"\n");
+
+    let new_json = tmp.path().join("new.json");
+    write_v3_manifest(&new_json, &[merge_entry(&target, &patch, "toml", false)]);
+
+    let output = run(&home, &new_json, None);
+    assert_success(&output);
+    let disk = fs::read_to_string(&target).unwrap();
+    assert!(
+        disk.contains("name = \"main\""),
+        "existing key lost: {disk}"
+    );
+    assert!(
+        disk.contains("model = \"opus\""),
+        "patch key missing: {disk}"
+    );
+}
