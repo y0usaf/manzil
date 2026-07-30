@@ -4,8 +4,10 @@
 
 mod app;
 mod filesystem;
+mod formats;
 mod lock;
 mod manifest;
+mod merge;
 
 use std::env;
 use std::path::Path;
