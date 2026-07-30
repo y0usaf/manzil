@@ -121,17 +121,20 @@
     ${concatMapStringsSep "\n" (n: (name: u: let
     new = (name: u:
     pkgs.writeText "manzil-manifest-${name}.json" (toJSON {
-      version = 2;
+      version = 3;
       files = pipe (allEntries u) [
         (filter (f: f.enable))
         (map (f:
-    filterAttrs (_: v: v != null) {
+    (filterAttrs (_: v: v != null) {
       inherit (f) type target clobber permissions uid gid;
       source =
         if f.source == null
         then null
         else "${f.source}";
-    }))
+    })
+    // optionalAttrs (f.type == "merge") ({inherit (f) format;}
+      // optionalAttrs (f.arrayDefault != "replace") {inherit (f) arrayDefault;}
+      // optionalAttrs (f.arrays != {}) {inherit (f) arrays;})))
       ];
     })) name u;
     old = "${stateDir}/manifest-${name}.json";
@@ -241,7 +244,7 @@ in {
         enable = mkEnableOption "this file" // {default = true;};
 
         type = mkOption {
-          type = enum ["symlink" "copy" "delete" "directory" "modify"];
+          type = enum ["symlink" "copy" "delete" "directory" "modify" "merge"];
           default = "symlink";
           description = "Managed path type.";
         };
@@ -320,11 +323,33 @@ in {
         value = mkOption {
           type = nullOr anything;
           default = null;
-          description = "Argument passed to `generator`.";
+          description = "Argument passed to `generator`; for `merge` entries, the patch attrset.";
+        };
+
+        format = mkOption {
+          type = nullOr (enum ["json" "toml" "yaml" "ini" "reg"]);
+          default = null;
+          description = "Format of the existing file a `merge` entry patches into. The patch itself is always JSON.";
+        };
+
+        arrayDefault = mkOption {
+          type = enum ["replace" "append" "prepend" "union"];
+          default = "replace";
+          description = "Default array merge strategy for `merge` entries (applies under `clobber = true`).";
+        };
+
+        arrays = mkOption {
+          type = attrsOf (enum ["replace" "append" "prepend" "union"]);
+          default = {};
+          example = {"editor.formatters" = "append";};
+          description = "Per-path (dot-separated) array strategy overrides for `merge` entries.";
         };
       };
 
       config = mkMerge [
+        (mkIf (config.type == "merge" && config.value != null && config.text == null && config.generator == null) {
+          source = mkDefault (pkgs.writeText "manzil-merge-${replaceStrings ["/"] ["-"] name}.json" (toJSON config.value));
+        })
         (mkIf (config.text != null) {
           source = mkDefault (pkgs.writeTextFile {
             name = "manzil-${replaceStrings ["/"] ["-"] name}";
@@ -572,7 +597,8 @@ in {
         ]
         ++ concatMap (set: (uname: label: files:
     mapAttrsToList (key: f: let
-      wantsSource = elem f.type ["symlink" "copy"];
+      wantsSource = elem f.type ["symlink" "copy" "merge"];
+      isMerge = f.type == "merge";
     in {
       assertion =
         !f.enable
@@ -582,16 +608,22 @@ in {
             then f.source != null
             else f.source == null
           )
-          && (!(f.permissions != null || f.uid != null || f.gid != null) || elem f.type ["copy" "directory" "modify"])
+          && (!(f.permissions != null || f.uid != null || f.gid != null) || elem f.type ["copy" "directory" "modify" "merge"])
+          && (isMerge -> (f.format != null))
+          && (!isMerge -> (f.format == null && f.arrays == {}))
         );
       message =
         "manzil.users.${uname}.${label}.\"${key}\": "
         + (
           if wantsSource && f.source == null
-          then "`source`, `text`, or `generator` is required for `${f.type}`."
+          then "`source`, `text`, `value`, or `generator` is required for `${f.type}`."
           else if !wantsSource && f.source != null
-          then "`source`, `text`, and source-valued `generator` are only valid for symlink/copy."
-          else "metadata is only valid for copy/directory/modify."
+          then "`source`, `text`, and source-valued `generator` are only valid for symlink/copy/merge."
+          else if isMerge && f.format == null
+          then "`format` is required for merge entries."
+          else if !isMerge && (f.format != null || f.arrays != {})
+          then "`format` and `arrays` are only valid for merge entries."
+          else "metadata is only valid for copy/directory/modify/merge."
         );
     })
     files) uname set.label set.files) (fileSets u))
