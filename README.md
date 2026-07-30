@@ -8,10 +8,12 @@ a small module, a small Rust linker, JSON manifests.
 ## Features
 
 - Per-user home files under `$HOME` + XDG roots.
-- File entry types: `symlink`, `copy`, `delete`, `directory`, `modify`.
+- File entry types: `symlink`, `copy`, `delete`, `directory`, `modify`, `merge`.
 - Metadata for real paths: `permissions`, `uid`, `gid`.
 - Per-user environment scripts + automatic `XDG_*_HOME` when XDG roots change.
 - `mimeapps.list` generation.
+- Declarative patches into mutable config files (`merge`): json/toml/yaml/ini/reg,
+  clobber or fill-missing-only, array strategies, RFC 7396 null deletes.
 - Per-user packages.
 - NixOS user systemd unit generation.
 - nix-darwin module export.
@@ -56,6 +58,14 @@ a small module, a small Rust linker, JSON manifests.
 
             files."old-file".type = "delete";
             files.".ssh/config" = { type = "modify"; permissions = "0600"; };
+
+            # merge: patch a mutable config the app also writes to.
+            # clobber = false fills in missing keys only.
+            files.".config/Code/User/settings.json" = {
+              type = "merge";
+              format = "json";
+              value."editor.fontSize" = 14;
+            };
 
             xdg.mimeApps.defaultApplications."text/plain" = "nvim.desktop";
 
@@ -126,30 +136,36 @@ script exports the corresponding `XDG_*_HOME` variable.
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `enable` | bool | `true` | Skip when false. |
-| `type` | enum | `"symlink"` | `symlink`, `copy`, `delete`, `directory`, `modify`. |
+| `type` | enum | `"symlink"` | `symlink`, `copy`, `delete`, `directory`, `modify`, `merge`. |
 | `target` | clean relative string | attr name | Absolute paths, `.`, `..`, empty segments rejected. |
 | `text` | string? | `null` | Generated source for `symlink`/`copy`. |
-| `source` | path? | `null` | Required for `symlink`/`copy`. |
+| `source` | path? | `null` | Required for `symlink`/`copy`; the JSON patch for `merge`. |
 | `executable` | bool | `false` | +x for generated `text` source. |
 | `clobber` | bool | default | Replace unmanaged targets where safe. |
-| `permissions` | octal string? | `null` | For `copy`/`directory`/`modify`. |
-| `uid` / `gid` | int? | `null` | For `copy`/`directory`/`modify`. |
-| `generator` | function? | `null` | Applied to `value`; returns source path or text. |
-| `value` | any? | `null` | Generator input. |
+| `permissions` | octal string? | `null` | For `copy`/`directory`/`modify`/`merge`. |
+| `uid` / `gid` | int? | `null` | For `copy`/`directory`/`modify`/`merge`. |
+| `generator` | function? | `null` | Applied to `value`; returns a source path or text. |
+| `value` | any? | `null` | Generator input; for `merge`, the patch attrset (serialized to JSON). |
+| `format` | enum? | `null` | Required for `merge`: format of the existing file (`json`, `toml`, `yaml`, `ini`, `reg`). |
+| `arrayDefault` | enum | `"replace"` | `merge` array strategy: `replace`, `append`, `prepend`, `union`. |
+| `arrays` | attrs | `{ }` | Per-path (dot-separated) `merge` array strategy overrides. |
 
 ## Linker rules
 
-Manifest schema v2:
+Manifest schema v3:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "files": [
     { "type": "symlink", "target": "/home/alice/.bashrc", "source": "/nix/store/...", "clobber": false },
     { "type": "copy", "target": "/home/alice/.config/app", "source": "/nix/store/...", "permissions": "0600" },
     { "type": "directory", "target": "/home/alice/.cache/app", "permissions": "0700" },
     { "type": "delete", "target": "/home/alice/old" },
-    { "type": "modify", "target": "/home/alice/.ssh/config", "permissions": "0600" }
+    { "type": "modify", "target": "/home/alice/.ssh/config", "permissions": "0600" },
+    { "type": "merge", "target": "/home/alice/.config/Code/User/settings.json",
+      "source": "/nix/store/...-patch.json", "format": "json", "clobber": false,
+      "arrayDefault": "replace", "arrays": { "plugins": "append" } }
   ]
 }
 ```
@@ -159,7 +175,37 @@ Manifest schema v2:
 - `directory`: creates a real directory; prunes only if empty.
 - `delete`: removes a file/symlink/directory tree if present.
 - `modify`: applies metadata to an existing path; missing paths are ignored.
+- `merge`: deep-merges a JSON patch into the target, parsed and re-serialized
+  as `format`. Creates the target if missing; never deletes it. `clobber = true`
+  overwrites conflicting values and honors RFC 7396 null-deletes; `clobber =
+  false` only fills in missing keys, preserving runtime edits. On entry removal
+  or patch change the linker **un-merges**: keys whose disk value still equals
+  the old patch value are removed, user-edited keys stay. Irreversible by
+  design: null-deleted keys, and `append`/`prepend`/`union` array elements.
 - Symlinks never receive `permissions`/`uid`/`gid`.
+
+### Merge formats
+
+The patch is always JSON (Nix attrsets are JSON-complete); `format` describes
+the existing file. Caveats, inherited from the format libraries:
+
+- **ini**: comments are permanently dropped on first merge; values are always
+  strings; sectionless keys live under the reserved `__global__` key.
+- **toml**: datetimes round-trip as strings.
+- **yaml**: single-document only; bare `yes`/`no` survive as strings under the
+  pinned `serde_yml` 0.0.12, but quote values you need kept as strings.
+- **reg**: values are typed objects, e.g.
+  `{ UseGLSL = { type = "sz"; value = "enabled"; }; }`; `hex` and `dword`
+  supported; a key set to `null` deletes it.
+
+### Migrating from patchix
+
+`patchix.users.<name>.patches.<path>` becomes a `merge` file entry. Two
+defaults flip: patchix clobbered by default (`clobber = true`) — manzil
+defaults `clobber = false`, so set it explicitly where overwrite semantics
+matter; and `defaultArrayStrategy`/`arrayStrategies` are now
+`arrayDefault`/`arrays`. Unlike patchix, removing a merge entry now un-merges
+the keys it owns on the next switch.
 
 Invoke directly:
 
