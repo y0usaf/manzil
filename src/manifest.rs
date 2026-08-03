@@ -38,6 +38,12 @@ pub(crate) struct Entry {
     pub(crate) source: Option<PathBuf>,
     #[serde(default)]
     pub(crate) clobber: bool,
+    /// Rewrite this entry on every activation, even when the target is
+    /// already managed and byte-identical, for a fresh inode/mtime (watcher
+    /// / daemon invalidation). Orthogonal to `clobber`: clobber takes over an
+    /// unmanaged target; force rewrites an already-managed, identical one.
+    #[serde(default)]
+    pub(crate) force: bool,
     #[serde(default)]
     pub(crate) permissions: Option<String>,
     #[serde(default)]
@@ -125,6 +131,15 @@ pub(crate) fn validate(manifest: &Manifest, allow_legacy_version: bool) -> io::R
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 "metadata is only valid for copy/directory/modify/merge entries",
+            ));
+        }
+
+        if entry.force
+            && !matches!(entry.ty, EntryType::Symlink | EntryType::Copy | EntryType::Merge)
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "force is only valid for symlink/copy/merge entries",
             ));
         }
 

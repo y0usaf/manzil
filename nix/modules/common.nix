@@ -126,7 +126,7 @@
         (filter (f: f.enable))
         (map (f:
     (filterAttrs (_: v: v != null) {
-      inherit (f) type target clobber permissions uid gid;
+      inherit (f) type target clobber force permissions uid gid;
       source =
         if f.source == null
         then null
@@ -293,6 +293,18 @@ in {
           type = bool;
           default = clobberDefault;
           description = "Overwrite an existing unmanaged target.";
+        };
+
+        force = mkOption {
+          type = bool;
+          default = false;
+          description = ''
+            Rewrite this entry on every activation, even when the target is
+            already managed and byte-identical, for a fresh inode/mtime
+            (watcher/daemon invalidation). Orthogonal to `clobber`: clobber
+            takes over an unmanaged target; force rewrites an
+            already-managed, identical one.
+          '';
         };
 
         permissions = mkOption {

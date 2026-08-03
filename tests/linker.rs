@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -573,6 +573,23 @@ fn merge_entry(target: &Path, patch: &Path, format: &str, clobber: bool) -> Stri
     )
 }
 
+fn merge_entry_force(
+    target: &Path,
+    patch: &Path,
+    format: &str,
+    clobber: bool,
+    force: bool,
+) -> String {
+    format!(
+        r#"{{"type":"merge","target":"{}","source":"{}","format":"{}","clobber":{},"force":{}}}"#,
+        json_escape(target),
+        json_escape(patch),
+        format,
+        clobber,
+        force
+    )
+}
+
 fn write_v3_manifest(path: &Path, entries: &[String]) {
     fs::write(
         path,
@@ -737,4 +754,137 @@ fn merge_toml_roundtrip() {
         disk.contains("model = \"opus\""),
         "patch key missing: {disk}"
     );
+}
+
+// --- force rewrites (schema v3) ---
+
+#[test]
+fn symlink_force_relinks_when_target_is_correct() {
+    let tmp = TempDir::new();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let source = tmp.path().join("src/file");
+    write_source(&source, "contents");
+    let target = home.join("link");
+    symlink(&source, &target).unwrap();
+
+    let new_json = tmp.path().join("new.json");
+    fs::write(
+        &new_json,
+        format!(
+            r#"{{"version":3,"files":[{{"target":"{}","source":"{}","force":true}}]}}"#,
+            json_escape(&target),
+            json_escape(&source)
+        ),
+    )
+    .unwrap();
+
+    let before = fs::symlink_metadata(&target).unwrap().ino();
+    let output = run(&home, &new_json, None);
+    assert_success(&output);
+    assert_eq!(fs::read_link(&target).unwrap(), source);
+    let after = fs::symlink_metadata(&target).unwrap().ino();
+    assert!(after != before, "force must relink for a fresh symlink inode");
+}
+
+#[test]
+fn copy_force_recopies_identical_target() {
+    let tmp = TempDir::new();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let source = tmp.path().join("src/file");
+    write_source(&source, "same bytes");
+    let target = home.join("copied");
+    write_source(&target, "same bytes");
+
+    let new_json = tmp.path().join("new.json");
+    fs::write(
+        &new_json,
+        format!(
+            r#"{{"version":3,"files":[{{"type":"copy","target":"{}","source":"{}","force":true}}]}}"#,
+            json_escape(&target),
+            json_escape(&source)
+        ),
+    )
+    .unwrap();
+
+    let before = fs::metadata(&target).unwrap().ino();
+    let output = run(&home, &new_json, None);
+    assert_success(&output);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "same bytes");
+    let after = fs::metadata(&target).unwrap().ino();
+    assert!(after != before, "force must recopy for a fresh file inode");
+}
+
+#[test]
+fn merge_force_rewrites_byte_identical_output() {
+    let tmp = TempDir::new();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let patch = tmp.path().join("patch.json");
+    write_source(&patch, r#"{"editor":{"fontSize":14},"theme":"dark"}"#);
+    let target = home.join("settings.json");
+
+    // first run settles the file
+    let new_json = tmp.path().join("new.json");
+    write_v3_manifest(&new_json, &[merge_entry_force(&target, &patch, "json", false, false)]);
+    let output = run(&home, &new_json, None);
+    assert_success(&output);
+    let settled = fs::read_to_string(&target).unwrap();
+    let before = fs::metadata(&target).unwrap().ino();
+    assert!(!settled.is_empty());
+
+    // force rewrites even though the re-merge is byte-identical
+    write_v3_manifest(&new_json, &[merge_entry_force(&target, &patch, "json", false, true)]);
+    let output = run(&home, &new_json, None);
+    assert_success(&output);
+    assert_eq!(fs::read_to_string(&target).unwrap(), settled);
+    let after = fs::metadata(&target).unwrap().ino();
+    assert!(after != before, "force must rewrite the merge target");
+}
+
+#[test]
+fn force_is_rejected_for_delete_directory_modify_entries() {
+    let tmp = TempDir::new();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let doomed = home.join("doomed");
+    let dir = home.join("dir");
+    let modified = home.join("modified");
+    write_source(&doomed, "bye");
+    write_source(&modified, "mode");
+
+    let new_json = tmp.path().join("new.json");
+    fs::write(
+        &new_json,
+        format!(
+            r#"{{"version":3,"files":[
+                {{"type":"delete","target":"{}","force":true}},
+                {{"type":"directory","target":"{}","force":true}},
+                {{"type":"modify","target":"{}","force":true}}
+            ]}}"#,
+            json_escape(&doomed),
+            json_escape(&dir),
+            json_escape(&modified)
+        ),
+    )
+    .unwrap();
+
+    let output = run(&home, &new_json, None);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("force is only valid for symlink/copy/merge entries"));
+    assert!(
+        fs::symlink_metadata(&doomed).is_ok(),
+        "invalid manifest must not delete"
+    );
+    assert!(
+        fs::symlink_metadata(&dir).is_err(),
+        "invalid manifest must not create"
+    );
+    assert_eq!(fs::read_to_string(&modified).unwrap(), "mode");
 }

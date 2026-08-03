@@ -106,10 +106,10 @@ fn activate_symlink(entry: &Entry, old_source: Option<&Path>) -> io::Result<()> 
     match fs::symlink_metadata(&entry.target) {
         Ok(m) if m.file_type().is_symlink() => {
             let current = fs::read_link(&entry.target)?;
-            if current == source {
+            if !entry.force && current == source {
                 return Ok(());
             }
-            if entry.clobber || old_source == Some(current.as_path()) {
+            if entry.clobber || entry.force || old_source == Some(current.as_path()) {
                 return atomic_symlink(source, &entry.target);
             }
 
@@ -121,7 +121,7 @@ fn activate_symlink(entry: &Entry, old_source: Option<&Path>) -> io::Result<()> 
             );
             Ok(())
         }
-        Ok(m) if entry.clobber => {
+        Ok(m) if entry.clobber || entry.force => {
             if m.is_dir() {
                 return Err(io::Error::new(
                     ErrorKind::AlreadyExists,
@@ -151,7 +151,7 @@ fn activate_copy(entry: &Entry, old: Option<&Entry>) -> io::Result<()> {
     match fs::symlink_metadata(&entry.target) {
         Ok(m) if m.file_type().is_symlink() => replace_copy_or_warn(entry, false),
         Ok(m) if m.is_dir() => {
-            if entry.clobber {
+            if entry.clobber || entry.force {
                 Err(io::Error::new(
                     ErrorKind::AlreadyExists,
                     "refusing to clobber directory",
@@ -164,7 +164,9 @@ fn activate_copy(entry: &Entry, old: Option<&Entry>) -> io::Result<()> {
                 Ok(())
             }
         }
-        Ok(_) if same_contents(&entry.target, source) => apply_metadata(&entry.target, entry),
+        Ok(_) if !entry.force && same_contents(&entry.target, source) => {
+            apply_metadata(&entry.target, entry)
+        }
         Ok(_) => {
             let owned = old
                 .and_then(|e| e.source.as_deref())
@@ -180,7 +182,7 @@ fn activate_copy(entry: &Entry, old: Option<&Entry>) -> io::Result<()> {
 }
 
 fn replace_copy_or_warn(entry: &Entry, owned: bool) -> io::Result<()> {
-    if entry.clobber || owned {
+    if entry.clobber || entry.force || owned {
         atomic_copy(source(entry)?, &entry.target)?;
         apply_metadata(&entry.target, entry)?;
         eprintln!("manzil: copied {}", entry.target.display());
@@ -274,7 +276,7 @@ fn activate_merge(entry: &Entry, old: Option<&Entry>) -> io::Result<()> {
     let merged = merge(existing_val, patch_val, &config, "");
     let out = formats::serialize(&merged, format).map_err(anyhow_to_io)?;
 
-    if out != existing_raw {
+    if entry.force || out != existing_raw {
         atomic_write_text(&entry.target, &out)?;
     }
     apply_metadata(&entry.target, entry)
