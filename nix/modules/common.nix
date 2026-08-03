@@ -183,6 +183,12 @@ in {
       description = "Default `clobber` value for every file, every user.";
     };
 
+    forceByDefault = mkOption {
+      type = bool;
+      default = false;
+      description = "Default `force` value for every file, every user.";
+    };
+
     linker = mkOption {
       type = package;
       default = pkgs.callPackage ../package.nix {};
@@ -227,7 +233,7 @@ in {
 
     mkFileSet = { description, rootDir }:
       mkOption {
-        type = attrsOf (({ clobberDefault, rootDir }:
+        type = attrsOf (({ clobberDefault, forceDefault, rootDir }:
     submodule ({
       config,
       name,
@@ -297,7 +303,7 @@ in {
 
         force = mkOption {
           type = bool;
-          default = false;
+          default = forceDefault;
           description = ''
             Rewrite this entry on every activation, even when the target is
             already managed and byte-identical, for a fresh inode/mtime
@@ -376,6 +382,7 @@ in {
     })) {
           inherit rootDir;
           clobberDefault = u.clobberByDefault;
+          forceDefault = u.forceByDefault;
         });
         default = {};
         inherit description;
@@ -399,6 +406,12 @@ in {
           type = bool;
           default = cfg.clobberByDefault;
           description = "Default `clobber` value for this user's files.";
+        };
+
+        forceByDefault = mkOption {
+          type = bool;
+          default = cfg.forceByDefault;
+          description = "Default `force` value for this user's files.";
         };
 
         packages = mkOption {

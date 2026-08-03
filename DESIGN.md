@@ -53,7 +53,10 @@
   a `forceByDefault` default (the second use does not exist yet — wait for
   one). Schema v3 gains the optional `force` field; module and linker ship
   from the same repo, so old-binary/new-manifest ambiguity cannot occur in
-  practice.
+  practice. 2026-08-02: the deferred second use arrived — the owner wants
+  every entry rewritten every activation — so `forceByDefault` shipped at
+  global and per-user level, mirroring `clobberByDefault`. No schema change:
+  `force` is already the optional v3 field.
 
 ## Architecture
 
