@@ -42,6 +42,18 @@
   lines of a working finit task in exchange for `mount(2)` behind a manifest
   parser holding CAP_SYS_ADMIN inside the shared linker binary. Composition
   stays one string: `manzil.finit.conditions = ["task/persist-user-binds/success"]`.
+- **2026-08-02 — per-entry `force` rewrites even unchanged entries.**
+  `force = true` bypasses the three skip guards (symlink already-pointing,
+  copy same-contents, merge byte-identical output) and rewrites via the
+  existing atomic sibling-tmp+rename paths, so the target gets a fresh
+  inode/mtime every activation (watcher/daemon invalidation). Orthogonal to
+  `clobber`: clobber takes over an UNMANAGED target; force rewrites an
+  already-managed-and-identical one. Both refuse directory targets. Rejected
+  alternatives: extending `clobber` (two orthogonal intents in one bool) and
+  a `forceByDefault` default (the second use does not exist yet — wait for
+  one). Schema v3 gains the optional `force` field; module and linker ship
+  from the same repo, so old-binary/new-manifest ambiguity cannot occur in
+  practice.
 
 ## Architecture
 
@@ -63,7 +75,8 @@ set; reversed if a third external linker consumer appears).
 Manifest schema v3: v2 plus entry type `merge` with fields `source` (JSON
 patch, store path), `format` (`json|toml|yaml|ini|reg`), `clobber`,
 `arrayDefault` (`replace|append|prepend|union`), `arrays` (dot-path →
-strategy), optional `permissions`/`uid`/`gid`. Merge targets are created if
+strategy), optional `permissions`/`uid`/`gid`, and optional `force`
+(rewrite even byte-identical managed entries). Merge targets are created if
 missing, written via atomic sibling-tmp rename, never owned: dropping the
 entry triggers un-merge, not file deletion.
 
