@@ -14,6 +14,9 @@ a small module, a small Rust linker, JSON manifests.
 - `mimeapps.list` generation.
 - Declarative patches into mutable config files (`merge`): json/toml/yaml/ini/reg,
   clobber or fill-missing-only, array strategies, RFC 7396 null deletes.
+- Checked-in base files merged with Nix overrides at eval time (`parser` +
+  `base`): write only the keys you care about in Nix, keep the rest of the
+  file in its own format.
 - Per-user packages.
 - NixOS user systemd unit generation.
 - nix-darwin module export.
@@ -77,6 +80,28 @@ a small module, a small Rust linker, JSON manifests.
   };
 }
 ```
+
+### Checked-in base files (`parser`)
+
+Keep a dotfile in its own format in your repo, set only the keys you manage in
+Nix, and let `generator` write the merged result:
+
+```nix
+files.".config/starship.toml" = {
+  generator = (pkgs.formats.toml { }).generate "starship.toml";
+  parser = "toml";
+  base = ./starship.toml;          # the checked-in file, left untouched
+  value.add_newline = false;       # Nix wins on conflicts
+};
+```
+
+`parser = "json" | "toml"` uses the Nix builtins; pass a function
+(`path` → attrset) for other formats. Attribute sets merge recursively; lists
+and scalars are replaced by `value`'s. To patch a config the **app also
+writes at runtime**, use a `merge` entry instead — `parser` works on pure,
+version-controlled files only (see
+[hjem#128](https://github.com/feel-co/hjem/issues/128) for the eval-time vs
+activation-time trade-off).
 
 For nix-darwin, import `manzil.darwinModules.default`.
 
@@ -146,6 +171,8 @@ script exports the corresponding `XDG_*_HOME` variable.
 | `uid` / `gid` | int? | `null` | For `copy`/`directory`/`modify`/`merge`. |
 | `generator` | function? | `null` | Applied to `value`; returns a source path or text. |
 | `value` | any? | `null` | Generator input; for `merge`, the patch attrset (serialized to JSON). |
+| `parser` | `"json"` / `"toml"` or function? | `null` | Parse `base` at eval time; attrsets merge under `value` (Nix wins, lists and scalars replaced); `generator` writes the merged whole file. |
+| `base` | path? | `null` | Checked-in file `parser` reads; never deployed itself. |
 | `format` | enum? | `null` | Required for `merge`: format of the existing file (`json`, `toml`, `yaml`, `ini`, `reg`). |
 | `arrayDefault` | enum | `"replace"` | `merge` array strategy: `replace`, `append`, `prepend`, `union`. |
 | `arrays` | attrs | `{ }` | Per-path (dot-separated) `merge` array strategy overrides. |
