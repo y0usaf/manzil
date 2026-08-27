@@ -17,5 +17,9 @@
       manzil = nixpkgs.legacyPackages."${system}".callPackage ./nix/package.nix {};
       default = manzil;
     });
+
+    checks = (nixpkgs.lib.genAttrs ["x86_64-linux" "aarch64-linux"]) (system: {
+      manzil-module = import ./tests/module.nix {inherit nixpkgs system;};
+    });
   };
 }

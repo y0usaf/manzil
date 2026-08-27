@@ -1,0 +1,6 @@
+theme = "light"
+baseOnly = "keep"
+
+[keys]
+quit = "q"
+list = ["a", "b"]

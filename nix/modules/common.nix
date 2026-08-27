@@ -20,6 +20,7 @@
     filterAttrs
     flatten
     hasPrefix
+    isString
     length
     literalExpression
     listToAttrs
@@ -35,6 +36,7 @@
     optionalAttrs
     optionalString
     pipe
+    recursiveUpdate
     replaceStrings
     splitString
     stringAfter
@@ -240,11 +242,44 @@ in {
       options,
       ...
     }: let
-      generated =
-        if config.generator != null
-        then config.generator config.value
+      # `parser` reads a checked-in base file at eval time and merges it under
+      # `value` (Nix wins) before `generator` writes the whole file. The base
+      # has its own `base` option: `source` is the deployed content, so a
+      # parser input on `source` would cycle through the generator.
+      parseBase =
+        if isString config.parser
+        then
+          (
+            if config.parser == "json"
+            then builtins.fromJSON
+            else builtins.fromTOML
+          )
+          (builtins.readFile config.base)
+        else config.parser config.base;
+      parserCheck =
+        if config.parser == null
+        then null
+        else if config.type == "merge"
+        then throw "manzil: `parser` is only valid for whole-file entries, not `merge`."
+        else if config.generator == null
+        then throw "manzil: `parser` requires `generator` to write the merged file."
+        else if config.base == null
+        then throw "manzil: `parser` requires `base`, the checked-in base file to parse."
         else null;
-      generatedIsPath = config.generator != null && options.source.type.check generated;
+      effectiveValue =
+        if config.parser == null
+        then config.value
+        else if config.value == null
+        then parseBase
+        else recursiveUpdate parseBase config.value;
+      generated =
+        builtins.seq parserCheck (
+          if config.generator != null
+          then config.generator effectiveValue
+          else null);
+      generatedIsPath =
+        builtins.seq parserCheck
+        (config.generator != null && options.source.type.check generated);
     in {
       options = {
         enable = mkEnableOption "this file" // {default = true;};
@@ -342,6 +377,25 @@ in {
           type = nullOr anything;
           default = null;
           description = "Argument passed to `generator`; for `merge` entries, the patch attrset.";
+        };
+
+        parser = mkOption {
+          type = nullOr (oneOf [(enum ["json" "toml"]) (functionTo anything)]);
+          default = null;
+          description = ''
+            Parse `base` at eval time into a base attrset and merge it under
+            `value` (Nix wins conflicts) before `generator` writes the whole
+            file. `"json"` / `"toml"` use the Nix builtins; a function
+            (`path` → attrset) handles other formats. Attribute sets merge
+            recursively; lists and scalars are replaced by `value`'s.
+            Requires `base` and `generator`; not valid for `merge` entries.
+          '';
+        };
+
+        base = mkOption {
+          type = nullOr path;
+          default = null;
+          description = "Checked-in base file for `parser` to read at eval time; never deployed itself.";
         };
 
         format = mkOption {
