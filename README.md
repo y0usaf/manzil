@@ -267,3 +267,14 @@ where desired.
 nix build
 cargo build --release
 ```
+
+### aarch64-linux
+
+`packages.aarch64-linux.default` builds natively; on an x86_64-linux host that
+means an aarch64 rustc under qemu-user. To target aarch64-linux from
+x86_64-linux, set `manzil.linker` to the cross-built static musl binary. Only
+manzil compiles, its closure holds no libc, and `cargo test` is not run:
+
+```nix
+manzil.linker = manzil.packages.x86_64-linux.manzil-aarch64-linux-static;
+```
